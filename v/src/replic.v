@@ -11,7 +11,7 @@ module replic
 import db.sqlite
 import rand
 import time
-import json
+import json2
 
 // Message types for replication protocol
 pub const msg_patch = 10
@@ -33,32 +33,32 @@ const default_max_patch_per_retransmission = 2000
 // Config holds replication configuration
 pub struct Config {
 pub mut:
-	heartbeat_interval_ms      int = default_heartbeat_interval_ms
-	max_patch_retention_ms     i64 = default_max_patch_retention_ms
+	heartbeat_interval_ms        int = default_heartbeat_interval_ms
+	max_patch_retention_ms       i64 = default_max_patch_retention_ms
 	max_patch_per_retransmission int = default_max_patch_per_retransmission
-	debug                      bool
+	debug                        bool
 }
 
 // PeerStats tracks synchronization state for a peer
 pub struct PeerStats {
 pub mut:
-	last_patch_at           i64 // Most recent patch timestamp
-	last_seq_id             i64 // Most recent sequence ID
-	guaranteed_contiguous_at i64 // Guaranteed contiguous timestamp
+	last_patch_at             i64 // Most recent patch timestamp
+	last_seq_id               i64 // Most recent sequence ID
+	guaranteed_contiguous_at  i64 // Guaranteed contiguous timestamp
 	guaranteed_contiguous_seq i64 // Guaranteed contiguous sequence ID
-	last_message_time       i64 // Last message received time (epoch ms)
+	last_message_time         i64 // Last message received time (epoch ms)
 }
 
 // Patch represents a replicated change
 pub struct Patch {
 pub:
-	msg_type  int    @[json: 'type']
-	at        i64    // HLC timestamp
-	peer      i64    // Source peer ID
-	seq       i64    // Sequence ID
-	ver       int    // Database version
-	tab       string // Table name
-	delta     string // JSON-encoded row data
+	msg_type int @[json: 'type']
+	at       i64    // HLC timestamp
+	peer     i64    // Source peer ID
+	seq      i64    // Sequence ID
+	ver      int    // Database version
+	tab      string // Table name
+	delta    string // JSON-encoded row data
 }
 
 // MissingPatchRequest requests retransmission of patches
@@ -74,12 +74,12 @@ pub:
 // Replicator manages SQLite replication
 pub struct Replicator {
 pub:
-	peer_id  i64
-	config   Config
+	peer_id i64
+	config  Config
 mut:
-	db       sqlite.DB
-	hlc      HLCState
-	db_version int = 1
+	db               sqlite.DB
+	hlc              HLCState
+	db_version       int = 1
 	last_sequence_id i64 = -1
 	last_patch_at    i64 = -1
 	peer_stats       map[i64]PeerStats
@@ -93,9 +93,9 @@ mut:
 pub fn new(db sqlite.DB, peer_id i64, config Config) !Replicator {
 	mut r := Replicator{
 		peer_id: if peer_id > 0 { peer_id } else { generate_peer_id() }
-		config: config
-		db: db
-		hlc: new_hlc_state()
+		config:  config
+		db:      db
+		hlc:     new_hlc_state()
 	}
 	return r
 }
@@ -162,7 +162,7 @@ pub fn (mut r Replicator) migrate(migrations []Migration) !MigrationResult {
 
 	return MigrationResult{
 		previous_version: last_applied
-		current_version: target
+		current_version:  target
 	}
 }
 
@@ -237,7 +237,7 @@ pub fn (mut r Replicator) upsert(table string, row_data map[string]string) !stri
 	}
 
 	patch_table := '${table}_patches'
-	sql_stmt := 'INSERT INTO ${patch_table} (${cols.join(", ")}) VALUES (${vals.join(", ")})'
+	sql_stmt := 'INSERT INTO ${patch_table} (${cols.join(', ')}) VALUES (${vals.join(', ')})'
 
 	r.db.exec(sql_stmt) or { return error('failed to save patch: ${err}') }
 
@@ -304,8 +304,10 @@ pub fn (mut r Replicator) receive_patch(patch Patch) ! {
 	// Store in patch table
 	patch_table := '${patch.tab}_patches'
 
-	// Parse delta JSON
-	delta := json.decode(map[string]string, patch.delta) or {
+	// Parse delta JSON. The values are SQLite column values (numbers, null, text), so they are
+	// decoded as json2.Any: a string map rejects numbers, and the removed cJSON module turned
+	// them into empty strings.
+	delta := json2.decode[map[string]json2.Any](patch.delta) or {
 		return error('invalid patch delta: ${err}')
 	}
 
@@ -320,10 +322,10 @@ pub fn (mut r Replicator) receive_patch(patch Patch) ! {
 
 	for k, v in delta {
 		cols << k
-		vals << "'${escape_sql(v)}'"
+		vals << sql_literal(v)
 	}
 
-	sql_stmt := 'INSERT INTO ${patch_table} (${cols.join(", ")}) VALUES (${vals.join(", ")})'
+	sql_stmt := 'INSERT INTO ${patch_table} (${cols.join(', ')}) VALUES (${vals.join(', ')})'
 	r.db.exec(sql_stmt) or { return error('failed to save received patch: ${err}') }
 
 	// Track peer stats
@@ -369,10 +371,10 @@ pub fn (mut r Replicator) add_remote_peer(remote_peer_id i64) {
 // status returns current replication status
 pub fn (r Replicator) status() ReplicationStatus {
 	return ReplicationStatus{
-		peer_id: r.peer_id
+		peer_id:          r.peer_id
 		last_sequence_id: r.last_sequence_id
-		last_patch_at: r.last_patch_at
-		peer_stats: r.peer_stats.clone()
+		last_patch_at:    r.last_patch_at
+		peer_stats:       r.peer_stats.clone()
 	}
 }
 
@@ -436,4 +438,17 @@ pub fn (r Replicator) is_consistent(peer_id i64, seq_id i64) bool {
 // Helper: escape SQL string
 fn escape_sql(s string) string {
 	return s.replace("'", "''")
+}
+
+// sql_literal is a delta value as an SQL literal: null is NULL, a boolean 1 or 0, and anything
+// else quoted text (numbers keep their digits, which SQLite's column affinity converts back;
+// objects and arrays their JSON, as the cJSON module gave them).
+fn sql_literal(v json2.Any) string {
+	return match v {
+		json2.Null { 'NULL' }
+		bool {
+			if v { '1' } else { '0' }
+		}
+		else { "'${escape_sql(v.str())}'" }
+	}
 }

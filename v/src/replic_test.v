@@ -1,6 +1,7 @@
 module replic
 
 import db.sqlite
+import json2
 
 fn setup_test_db() !sqlite.DB {
 	// Create in-memory database for testing
@@ -58,7 +59,7 @@ fn test_migration_creates_table() {
 
 	migrations := [
 		Migration{
-			up: '
+			up:   '
 				CREATE TABLE users (
 					id INTEGER PRIMARY KEY,
 					name TEXT NOT NULL
@@ -124,7 +125,21 @@ fn test_is_consistent_unknown_peer() {
 }
 
 fn test_escape_sql() {
-	assert escape_sql("hello") == "hello"
+	assert escape_sql('hello') == 'hello'
 	assert escape_sql("it's") == "it''s"
 	assert escape_sql("O'Brien") == "O''Brien"
+}
+
+// Patches from the JavaScript peers carry SQLite's own column values: numbers, null and text
+// (lib/index.js builds `delta` with json_object). Each must reach the patch table as that value.
+fn test_delta_values_keep_their_sqlite_meaning() {
+	delta := json2.decode[map[string]json2.Any]('{"n":5,"f":1.5,"s":"it\'s","z":null,"b":true,"o":{"k":1}}') or {
+		panic(err)
+	}
+	assert sql_literal(delta['n']) == "'5'"
+	assert sql_literal(delta['f']) == "'1.5'"
+	assert sql_literal(delta['s']) == "'it''s'"
+	assert sql_literal(delta['z']) == 'NULL'
+	assert sql_literal(delta['b']) == '1'
+	assert sql_literal(delta['o']) == '\'{"k":1}\''
 }
